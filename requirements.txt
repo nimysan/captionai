@@ -1,2 +1,4 @@
 aiofile
-# amazon-transcribe-streaming-sdk
+aiohttp
+boto3
+# amazon-transcribe-streaming-sdk is installed locally from the directory

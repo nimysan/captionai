@@ -6,10 +6,12 @@ It supports PCM audio files and handles streaming with proper rate limiting for 
 
 import asyncio
 import aiofile
+import boto3
 from amazon_transcribe.client import TranscribeStreamingClient
 from amazon_transcribe.handlers import TranscriptResultStreamHandler
 from amazon_transcribe.model import TranscriptEvent
 from amazon_transcribe.utils import apply_realtime_delay
+import time
 
 # Audio configuration constants
 SAMPLE_RATE = 16000
@@ -38,7 +40,18 @@ class TranscriptionHandler(TranscriptResultStreamHandler):
         results = transcript_event.transcript.results
         for result in results:
             for alt in result.alternatives:
-                print(alt.transcript)
+                print(f"Transcription: {alt.transcript}")
+
+
+async def check_aws_credentials():
+    """Check if AWS credentials are properly configured"""
+    try:
+        boto3.client('sts').get_caller_identity()
+        return True
+    except Exception as e:
+        print(f"AWS Credentials Error: {str(e)}")
+        print("Please configure AWS credentials with appropriate permissions")
+        return False
 
 
 async def transcribe_audio_stream():
@@ -46,34 +59,97 @@ async def transcribe_audio_stream():
     Main transcription function that sets up the streaming client and processes audio data.
     Handles both the audio streaming and transcription result processing.
     """
-    # Initialize the transcription client
-    client = TranscribeStreamingClient(region=REGION)
+    if not await check_aws_credentials():
+        return
 
-    # Start the transcription stream
-    stream = await client.start_stream_transcription(
-        language_code="en-US",
-        media_sample_rate_hz=SAMPLE_RATE,
-        media_encoding="pcm",
-    )
+    try:
+        # Initialize the transcription client
+        client = TranscribeStreamingClient(region=REGION)
 
-    async def stream_audio_chunks():
-        """
-        Stream audio data from file to Amazon Transcribe with proper rate limiting.
-        """
-        async with aiofile.AIOFile(AUDIO_PATH, "rb") as afp:
-            reader = aiofile.Reader(afp, chunk_size=CHUNK_SIZE)
-            await apply_realtime_delay(
-                stream, 
-                reader, 
-                BYTES_PER_SAMPLE, 
-                SAMPLE_RATE, 
-                CHANNEL_NUMS
-            )
-        await stream.input_stream.end_stream()
+        # Start the transcription stream
+        stream = await client.start_stream_transcription(
+            language_code="ar-SA",  # Changed to Arabic (Saudi Arabia)
+            media_sample_rate_hz=SAMPLE_RATE,
+            media_encoding="pcm",
+        )
 
-    # Set up handler and process events
-    handler = TranscriptionHandler(stream.output_stream)
-    await asyncio.gather(stream_audio_chunks(), handler.handle_events())
+        async def stream_audio_chunks():
+            """
+            Stream audio data from file to Amazon Transcribe with proper rate limiting.
+            """
+            async with aiofile.AIOFile(AUDIO_PATH, "rb") as afp:
+                reader = aiofile.Reader(afp, chunk_size=CHUNK_SIZE)
+                await apply_realtime_delay(
+                    stream, 
+                    reader, 
+                    BYTES_PER_SAMPLE, 
+                    SAMPLE_RATE, 
+                    CHANNEL_NUMS
+                )
+            await stream.input_stream.end_stream()
+
+        # Set up handler and process events
+        handler = TranscriptionHandler(stream.output_stream)
+        await asyncio.gather(stream_audio_chunks(), handler.handle_events())
+
+    except Exception as e:
+        print(f"Transcription Error: {str(e)}")
+
+
+async def transcribe_network_stream(audio_stream):
+    """
+    Transcribe audio from a network stream (e.g., ffmpeg output).
+    
+    Args:
+        audio_stream: An async iterator that yields chunks of PCM audio data
+                     (16000 Hz, 16-bit, mono)
+    """
+    if not await check_aws_credentials():
+        return
+
+    try:
+        print("Initializing transcription client...")
+        client = TranscribeStreamingClient(region=REGION)
+        
+        print("Starting transcription stream...")
+        stream = await client.start_stream_transcription(
+            # language_code="ar-SA",  # Changed to Arabic (Saudi Arabia)
+             language_code="zh-CN",  # Changed to Arabic (Saudi Arabia)
+            media_sample_rate_hz=SAMPLE_RATE,
+            media_encoding="pcm",
+        )
+
+        async def stream_audio():
+            """
+            Stream audio data from network source to Amazon Transcribe with rate limiting.
+            """
+            bytes_per_second = SAMPLE_RATE * BYTES_PER_SAMPLE * CHANNEL_NUMS
+            chunk_duration = CHUNK_SIZE / bytes_per_second
+            
+            try:
+                print("Starting to stream audio chunks...")
+                async for chunk in audio_stream:
+                    if not chunk:
+                        break
+                        
+                    # Send chunk to transcribe
+                    await stream.input_stream.send_audio_event(audio_chunk=chunk)
+                    
+                    # Rate limiting to maintain real-time pace
+                    await asyncio.sleep(chunk_duration)
+                    
+            except Exception as e:
+                print(f"Error streaming audio: {e}")
+            finally:
+                print("Ending audio stream...")
+                await stream.input_stream.end_stream()
+
+        print("Setting up transcription handler...")
+        handler = TranscriptionHandler(stream.output_stream)
+        await asyncio.gather(stream_audio(), handler.handle_events())
+
+    except Exception as e:
+        print(f"Transcription Error: {str(e)}")
 
 
 def main():
