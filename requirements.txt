@@ -1,4 +1,8 @@
 aiofile
 aiohttp
 boto3
+noisereduce
+numpy
+soundfile
+librosa
 # amazon-transcribe-streaming-sdk is installed locally from the directory

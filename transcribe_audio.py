@@ -17,7 +17,7 @@ import time
 SAMPLE_RATE = 16000
 BYTES_PER_SAMPLE = 2
 CHANNEL_NUMS = 1
-CHUNK_SIZE = 1024 * 8
+CHUNK_SIZE = 1024 * 4  # Reduced to match mic_input.py
 
 # AWS and file path configuration
 REGION = "us-west-2"
@@ -107,14 +107,18 @@ async def transcribe_network_stream(audio_stream):
     if not await check_aws_credentials():
         return
 
+    client = None
+    stream = None
+    stream_task = None
+    handler_task = None
+
     try:
         print("Initializing transcription client...")
         client = TranscribeStreamingClient(region=REGION)
         
         print("Starting transcription stream...")
         stream = await client.start_stream_transcription(
-            # language_code="ar-SA",  # Changed to Arabic (Saudi Arabia)
-             language_code="zh-CN",  # Changed to Arabic (Saudi Arabia)
+            language_code="zh-CN",
             media_sample_rate_hz=SAMPLE_RATE,
             media_encoding="pcm",
         )
@@ -131,25 +135,58 @@ async def transcribe_network_stream(audio_stream):
                 async for chunk in audio_stream:
                     if not chunk:
                         break
+                    
+                    try:
+                        # Send chunk to transcribe
+                        await stream.input_stream.send_audio_event(audio_chunk=chunk)
                         
-                    # Send chunk to transcribe
-                    await stream.input_stream.send_audio_event(audio_chunk=chunk)
+                        # Rate limiting to maintain real-time pace
+                        await asyncio.sleep(chunk_duration)
+                    except asyncio.CancelledError:
+                        break
+                    except Exception as e:
+                        print(f"Error sending audio chunk: {e}")
+                        break
                     
-                    # Rate limiting to maintain real-time pace
-                    await asyncio.sleep(chunk_duration)
-                    
+            except GeneratorExit:
+                print("Audio stream generator closed")
             except Exception as e:
                 print(f"Error streaming audio: {e}")
             finally:
-                print("Ending audio stream...")
-                await stream.input_stream.end_stream()
+                if stream and stream.input_stream:
+                    try:
+                        print("Ending audio stream...")
+                        await stream.input_stream.end_stream()
+                    except Exception as e:
+                        print(f"Error ending stream: {e}")
 
         print("Setting up transcription handler...")
         handler = TranscriptionHandler(stream.output_stream)
-        await asyncio.gather(stream_audio(), handler.handle_events())
+        
+        # Create tasks for streaming and handling
+        stream_task = asyncio.create_task(stream_audio())
+        handler_task = asyncio.create_task(handler.handle_events())
+        
+        # Wait for both tasks to complete
+        await asyncio.gather(stream_task, handler_task)
 
     except Exception as e:
         print(f"Transcription Error: {str(e)}")
+    finally:
+        # Clean up tasks
+        if stream_task and not stream_task.done():
+            stream_task.cancel()
+            try:
+                await stream_task
+            except asyncio.CancelledError:
+                pass
+            
+        if handler_task and not handler_task.done():
+            handler_task.cancel()
+            try:
+                await handler_task
+            except asyncio.CancelledError:
+                pass
 
 
 def main():

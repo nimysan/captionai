@@ -1,11 +1,14 @@
 import asyncio
 import platform
+from audio_processor import AudioProcessor
 
 class MicrophoneInput:
     def __init__(self):
         """Initialize microphone input handler"""
         self._ffmpeg_process = None
         self._setup_device_name()
+        self.audio_processor = AudioProcessor()
+        self._running = False
 
     def _setup_device_name(self):
         """Set up the audio input device name based on OS"""
@@ -26,6 +29,7 @@ class MicrophoneInput:
         - Format: 16-bit PCM
         """
         try:
+            self._running = True
             # Set up ffmpeg command for microphone capture
             command = [
                 'ffmpeg',
@@ -35,6 +39,7 @@ class MicrophoneInput:
                 '-ar', '16000',           # Set sample rate to 16000 Hz
                 '-ac', '1',               # Convert to mono
                 '-f', 's16le',           # Output format
+                '-bufsize', '4k',         # Buffer size to prevent stream from getting too big
                 'pipe:1'                  # Output to pipe
             ]
 
@@ -47,25 +52,43 @@ class MicrophoneInput:
             self._ffmpeg_process = process
 
             print("Started microphone capture. Speaking into microphone...")
+            print("Collecting noise profile (please remain silent for 1 second)...")
 
             # Read chunks from ffmpeg output
-            chunk_size = 8 * 1024  # 8KB chunks
-            while True:
-                chunk = await process.stdout.read(chunk_size)
-                if not chunk:
-                    break
-                yield chunk
+            chunk_size = 4 * 1024  # 4KB chunks (reduced from 8KB)
+            while self._running:
+                try:
+                    chunk = await process.stdout.read(chunk_size)
+                    if not chunk:
+                        break
+                    
+                    # Process chunk with noise reduction
+                    processed_chunk = await self.audio_processor.process_chunk(chunk)
+                    if processed_chunk is not None:
+                        yield processed_chunk
 
+                except asyncio.CancelledError:
+                    self._running = False
+                    break
+
+        except GeneratorExit:
+            self._running = False
+            await self.close()
         except Exception as e:
             print(f"Error in MicrophoneInput: {str(e)}")
+            self._running = False
             raise
         finally:
-            if self._ffmpeg_process:
-                self._ffmpeg_process.terminate()
-                await self._ffmpeg_process.wait()
+            await self.close()
 
     async def close(self):
         """Clean up resources"""
+        self._running = False
         if self._ffmpeg_process:
-            self._ffmpeg_process.terminate()
-            await self._ffmpeg_process.wait()
+            try:
+                self._ffmpeg_process.terminate()
+                await asyncio.wait_for(self._ffmpeg_process.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                self._ffmpeg_process.kill()  # Force kill if termination takes too long
+            finally:
+                self._ffmpeg_process = None
