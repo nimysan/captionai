@@ -1,13 +1,10 @@
 import asyncio
 import platform
-from audio_processor import AudioProcessor
-
 class MicrophoneInput:
     def __init__(self):
         """Initialize microphone input handler"""
         self._ffmpeg_process = None
         self._setup_device_name()
-        self.audio_processor = AudioProcessor()
         self._running = False
 
     def _setup_device_name(self):
@@ -39,7 +36,8 @@ class MicrophoneInput:
                 '-ar', '16000',           # Set sample rate to 16000 Hz
                 '-ac', '1',               # Convert to mono
                 '-f', 's16le',           # Output format
-                '-bufsize', '4k',         # Buffer size to prevent stream from getting too big
+                '-bufsize', '2k',         # Reduced buffer size to prevent stream from getting too big
+                '-frame_size', '512',     # Small frame size to keep chunks manageable
                 'pipe:1'                  # Output to pipe
             ]
 
@@ -52,20 +50,17 @@ class MicrophoneInput:
             self._ffmpeg_process = process
 
             print("Started microphone capture. Speaking into microphone...")
-            print("Collecting noise profile (please remain silent for 1 second)...")
 
             # Read chunks from ffmpeg output
-            chunk_size = 4 * 1024  # 4KB chunks (reduced from 8KB)
+            chunk_size = 2 * 1024  # 2KB chunks
             while self._running:
                 try:
                     chunk = await process.stdout.read(chunk_size)
                     if not chunk:
                         break
                     
-                    # Process chunk with noise reduction
-                    processed_chunk = await self.audio_processor.process_chunk(chunk)
-                    if processed_chunk is not None:
-                        yield processed_chunk
+                    # Directly yield the raw chunk without noise reduction
+                    yield chunk
 
                 except asyncio.CancelledError:
                     self._running = False
